@@ -12,6 +12,86 @@ from core import constants as c
 import scipy.fft
 import scipy.optimize
 
+# The goal is to check which parameters are important for what implementation
+
+class SimpleFuelCell:
+    def __init__(self, nominalPower: float, elEff: float, thEff: float, powerOn: bool):
+        self.Npower = nominalPower
+        self.h2p_el_eff_in = elEff
+        self.h2p_th_eff_in = thEff
+
+        self.__assert_valid_efficiency()
+
+        self.h2p_eff = (1/(self.h2p_el_eff_in*c.HHVH2*1000))*3600 # [kg/kWh] kg/h of hydrogen produced per kWh of input power            
+        self.MaxPowerStack  = self.Npower          # [kW]     Stack maximum power output
+        self.max_h2_stack   = self.MaxPowerStack/(self.h2p_el_eff_in*c.HHVH2*1000)    # [kg/s] maximum amount of exploitable hydrogen for the considered stack
+        self.MinOutputPower      = 0  # [kW] minimum input power  
+        self.MaxPowerStack       = self.Npower           # [kW] fuel cell stack total power
+
+        self.powerOn = powerOn
+
+    def __assert_valid_efficiency(self):
+        total_efficiency = self.h2p_el_eff_in + self.h2p_th_eff_in
+        if total_efficiency > 1:
+            raise ValueError(f"Warning: Total efficiency results to be {total_efficiency*100:.1f} %. Decrease 'electric efficiency' or 'thermal efficiency' so that their sum does not exceed one.")
+
+    def __set_op(self, startDay, startMonth, endDay, endMonth):
+        """
+        TODO: what
+        """
+
+        # Creates an array with 365 entries that represent the days of a year
+        # In this array every entry is either 0 or 1, meaning the fuelcell is on that day off or on respectively
+        # Using the start and end dates, this array will be created.
+        # If powerOn = true then the fuelcell will be on in the given time-frame, otherwise off
+        initial_day = pd.to_datetime(f"{startDay}-{startMonth}", format = '%d-%m')
+        final_day = pd.to_datetime(f"{endDay}-{endMonth}", format = '%d-%m')
+        year = initial_day.year
+        operational_state = [] 
+        
+        for day in pd.date_range(start = pd.Timestamp(year=year,month=1,day=1), end = pd.Timestamp(year=year+1,month=1, day=1)):
+            if self.powerOn:                 
+                value = 0                                         #initialization
+                if day >= initial_day and day <= final_day:
+                    value = 1                                      #update if turned on 
+                operational_state.append((day, value))
+            else:
+                 value = 1                                         #initialization
+                 if day >= initial_day and day <= final_day:
+                     value = 0                                    #update if turned off
+                 operational_state.append((day, value))
+
+        operational_state = pd.DataFrame(operational_state, columns=['Day', 'State'])
+        operational_state.set_index('Day', inplace=True)
+        frequency =  f'{self.timestep}min'
+        operational_state_freq = operational_state.resample(frequency).ffill().iloc[:-1,:]  #resample dataframe to simulation timestep
+        self.operational_state = np.tile(np.array(operational_state_freq['State']), int(self.timestep_number*self.timestep/c.MINUTES_YEAR)) #repeat for simulation years
+
+    def use(self,step,p,available_hyd)):
+        available_hydrogen = available_hyd/(self.timestep*60) # [kg] to [kg/s] conversion for available hydrogen at the considered step
+        state = self.operational_state[step]
+        if state == 0:
+            p = 0   # # fuel cell turned off as for planned operation schedule, required power output forced to zero
+
+        p_required = -p                      # [kW] system power requirement in the considered step
+        
+        power = min(p_required,self.Npower)      # [kW] how much electricity can be absorbed by the fuel cell absorb
+        
+        FC_hyd = power / self.h2p_el_eff_in            # [kW] hydrogen power input
+        hyd = power/(self.h2p_el_eff_in*c.HHVH2*1000)    # [kg/s] amount of needed hydrogen for the given input power
+        FC_Heat = FC_hyd * self.h2p_th_eff_in           # [kW] thermal power output
+                                                                                                                                             
+        water = (hyd*(self.h2oMolMass/self.H2MolMass))/self.rhoStdh2o       # [Sm3/s] stoichiometric water production
+       
+        etaFC = self.h2p_el_eff_in
+        if hyd > available_hydrogen: # if available hydrogen is not enough to meet demand
+            hyd     = available_hydrogen
+            power   = hyd * self.h2p_el_eff_in 
+            FC_Heat = hyd * self.h2p_th_eff_in
+            water   = (hyd*(self.h2oMolMass/self.H2MolMass))/self.rhoStdh2o       # [Sm3/s] stoichiometric water production
+            
+        return (-hyd,power,FC_Heat,etaFC,water) # return hydrogen absorbed [kg] and electricity required [kW]
+
 
 class fuel_cell:
     
@@ -86,8 +166,6 @@ class fuel_cell:
         # Ambient conditions 
         self.AmbTemp      = c.AMBTEMP               # [K]         Standard ambient temperature - 15 °C
      
-        self.h2p_el_eff_in = parameters.get('electric efficiency',False)
-        self.h2p_th_eff_in = parameters.get('thermal efficiency',False)
         if self.model == 'simple':
             if not isinstance(self.h2p_el_eff_in, (int, float)) or self.h2p_el_eff_in is False:
                 raise ValueError("Warning: For the fuel cell 'simple' model, 'electric efficiency' must be provided and must be a number between 0 and 1.")
@@ -111,15 +189,6 @@ class fuel_cell:
         ###########################################
         if self.model == 'simple':     
             
-            total_efficiency = self.h2p_el_eff_in + self.h2p_th_eff_in
-            if total_efficiency > 1:
-                raise ValueError(f"Warning: Total efficiency results to be {total_efficiency*100:.1f} %. Decrease 'electric efficiency' or 'thermal efficiency' so that their sum does not exceed one.")
-            print("\nWarning: fuel cell simple model has only a specific consumption value, it does not consider ageing and minimum load")
-            self.h2p_eff = (1/(self.h2p_el_eff_in*c.HHVH2*1000))*3600 # [kg/kWh] kg/h of hydrogen produced per kWh of input power            
-            self.MaxPowerStack  = self.Npower          # [kW]     Stack maximum power output
-            self.max_h2_stack   = self.MaxPowerStack/(self.h2p_el_eff_in*c.HHVH2*1000)    # [kg/s] maximum amount of exploitable hydrogen for the considered stack
-            self.MinOutputPower      = 0  # [kW] minimum input power  
-            self.MaxPowerStack       = self.Npower           # [kW] fuel cell stack total power
                              
                                                                                           
 
@@ -825,28 +894,6 @@ class fuel_cell:
         ##########################
         if self.model=='simple':
             
-            p_required = -p                      # [kW] system power requirement in the considered step
-            
-            power = min(p_required,self.Npower)      # [kW] how much electricity can be absorbed by the fuel cell absorb
-            
-            FC_hyd = power / self.h2p_el_eff_in            # [kW] hydrogen power input
-            hyd = power/(self.h2p_el_eff_in*c.HHVH2*1000)    # [kg/s] amount of needed hydrogen for the given input power
-            FC_Heat = FC_hyd * self.h2p_th_eff_in           # [kW] thermal power output
-                                                                 
-                                                                                                   
-                                                                                                                                                                  
-                                                                                            
-                                                                                                                                                 
-            water = (hyd*(self.h2oMolMass/self.H2MolMass))/self.rhoStdh2o       # [Sm3/s] stoichiometric water production
-           
-            etaFC = self.h2p_el_eff_in
-            if hyd > available_hydrogen: # if available hydrogen is not enough to meet demand
-                hyd     = available_hydrogen
-                power   = hyd * self.h2p_el_eff_in 
-                FC_Heat = hyd * self.h2p_th_eff_in
-                water   = (hyd*(self.h2oMolMass/self.H2MolMass))/self.rhoStdh2o       # [Sm3/s] stoichiometric water production
-                
-            return (-hyd,power,FC_Heat,etaFC,water) # return hydrogen absorbed [kg] and electricity required [kW]
 
          ###############################
         if self.model in ['PEM General','SOFC']:
