@@ -15,7 +15,14 @@ import scipy.optimize
 # The goal is to check which parameters are important for what implementation
 
 class SimpleFuelCell:
-    def __init__(self, nominalPower: float, elEff: float, thEff: float, powerOn: bool):
+    # The number of minutes that one time step goes over
+    timestep = 60
+
+    # The number of timesteps that will be executed
+    # In this case with a timestep of 60min (ie 1hr) equates to 2 years
+    timestep_number = 17520
+
+    def __init__(self, nominalPower: float, elEff: float, thEff: float, powerOn: bool, startDay: int, startMonth: int, endDay: int, endMonth: int):
         self.Npower = nominalPower
         self.h2p_el_eff_in = elEff
         self.h2p_th_eff_in = thEff
@@ -26,21 +33,19 @@ class SimpleFuelCell:
         self.MaxPowerStack  = self.Npower          # [kW]     Stack maximum power output
         self.max_h2_stack   = self.MaxPowerStack/(self.h2p_el_eff_in*c.HHVH2*1000)    # [kg/s] maximum amount of exploitable hydrogen for the considered stack
         self.MinOutputPower      = 0  # [kW] minimum input power  
-        self.MaxPowerStack       = self.Npower           # [kW] fuel cell stack total power
 
         self.powerOn = powerOn
+
+        self.operation_state = self.__calc_op(startDay, startMonth, endDay, endMonth)
 
     def __assert_valid_efficiency(self):
         total_efficiency = self.h2p_el_eff_in + self.h2p_th_eff_in
         if total_efficiency > 1:
             raise ValueError(f"Warning: Total efficiency results to be {total_efficiency*100:.1f} %. Decrease 'electric efficiency' or 'thermal efficiency' so that their sum does not exceed one.")
 
-    def __set_op(self, startDay, startMonth, endDay, endMonth):
-        """
-        TODO: what
-        """
-
-        # Creates an array with 365 entries that represent the days of a year
+    def __create_day_list(self, startDay, startMonth, endDay, endMonth):
+        # Creates a matrix with 365 entries that represent the days of a year with their states
+        # First col is a timestamp for the day
         # In this array every entry is either 0 or 1, meaning the fuelcell is on that day off or on respectively
         # Using the start and end dates, this array will be created.
         # If powerOn = true then the fuelcell will be on in the given time-frame, otherwise off
@@ -61,23 +66,61 @@ class SimpleFuelCell:
                      value = 0                                    #update if turned off
                  operational_state.append((day, value))
 
+        return operation_state
+
+    def __calc_op(self, startDay, startMonth, endDay, endMonth):
+        """
+        Creates and sets an array that defines when the fuelcell is on or off.
+        This is done by checking in what timespan the fuelcell is on, calculated by the parameters.
+        This is then expanded to individual timesteps so one can tell on what timestep the fuelcell is on or off.
+        """
+        operational_state = self.__create_day_list(startDay, startMonth, endDay, endMonth)
+
+        # Renames the columns and creates an index on the day
         operational_state = pd.DataFrame(operational_state, columns=['Day', 'State'])
         operational_state.set_index('Day', inplace=True)
+
+        # Resamples the timestamps to be for every timestep, not every day 
         frequency =  f'{self.timestep}min'
-        operational_state_freq = operational_state.resample(frequency).ffill().iloc[:-1,:]  #resample dataframe to simulation timestep
-        self.operational_state = np.tile(np.array(operational_state_freq['State']), int(self.timestep_number*self.timestep/c.MINUTES_YEAR)) #repeat for simulation years
+        operational_state_freq = operational_state.resample(frequency).ffill().iloc[:-1,:]
+
+        # Repeat the data for the number of years
+        # Only use the states for the resulting array
+        numberOfYears = int(self.timestep_number*self.timestep/c.MINUTES_YEAR)
+        states = np.array(operational_state_freq['State'])
+
+        return np.tile(states, numberOfYears) #repeat for simulation years
 
     def use(self,step,p,available_hyd)):
-        available_hydrogen = available_hyd/(self.timestep*60) # [kg] to [kg/s] conversion for available hydrogen at the considered step
+        """
+        Uses the fuelcell at the given steps and returns the data about the used values
+
+        Parameters
+        ----------
+        step: int
+            The current step to be indexing the operational_state array
+        p: float
+            The power [kW] that is used by the system in the current time step. 
+            Should be less than 0
+        available_hyd: float
+            The hydrogen (in kg) that is available in this timestep
+        """
+
+        # [kg] to [kg/sec] conversion for available hydrogen at the considered step
+        available_hydrogen = available_hyd/(self.timestep*60) 
+
         state = self.operational_state[step]
-        if state == 0:
-            p = 0   # # fuel cell turned off as for planned operation schedule, required power output forced to zero
 
         p_required = -p                      # [kW] system power requirement in the considered step
+
+        if state == 0:
+            p_required = 0   # # fuel cell turned off as for planned operation schedule, required power output forced to zero
         
-        power = min(p_required,self.Npower)      # [kW] how much electricity can be absorbed by the fuel cell absorb
+        # Either the power is sufficient and it will be used, or all the available power will be used
+        power = min(p_required,self.Npower)
         
-        FC_hyd = power / self.h2p_el_eff_in            # [kW] hydrogen power input
+        # All the power the hydrogen cell releases
+        FC_hyd = power / self.h2p_el_eff_in
         hyd = power/(self.h2p_el_eff_in*c.HHVH2*1000)    # [kg/s] amount of needed hydrogen for the given input power
         FC_Heat = FC_hyd * self.h2p_th_eff_in           # [kW] thermal power output
                                                                                                                                              
@@ -92,6 +135,28 @@ class SimpleFuelCell:
             
         return (-hyd,power,FC_Heat,etaFC,water) # return hydrogen absorbed [kg] and electricity required [kW]
 
+class PemFuelCell:
+    def __init__(self):
+        pass
+
+    def use(self, step, p, available_hyd):
+        """
+        Uses the fuelcell at the given steps and returns the data about the used values
+
+        Parameters
+        ----------
+        step: int
+            The current step to be indexing the operational_state array
+        p: float
+            The power [kW] that is used by the system in the current time step. 
+            Should be less than 0
+        available_hyd: float
+            The hydrogen (in kg) that is available in this timestep
+        """
+        available_hydrogen = available_hyd/(self.timestep*60) # [kg] to [kg/s] conversion for available hydrogen at the considered step
+        state = self.operational_state[step]
+        if state == 0:
+            p = 0   # # fuel cell turned off as for planned operation schedule, required power output forced to zero
 
 class fuel_cell:
     
@@ -186,16 +251,6 @@ class fuel_cell:
             raise ValueError("Warning: Invalid model selected.")
            
         self.MinOutputPower       = self.min_input_module *self.Npower                    # [kW] minimum output power chosen as tot% of module nominal power                                                                                                                                                     
-        ###########################################
-        if self.model == 'simple':     
-            
-                             
-                                                                                          
-
-            print(f"\nThe fuel cell electric efficiency is set equal to {self.h2p_el_eff_in*100:.1f}%, which is equivalent to {round(self.h2p_eff, 3)} kg/kWh (using H2 HHV). "
-                  f"The fuel cell thermal efficiency is set equal to {self.h2p_th_eff_in*100:.1f}%. The output heat temperature is not available for the 'simple' model. "
-                  f"Thus, the total efficiency is equal to {total_efficiency*100:.1f}%. "
-                  f"A fuel cell nominal power of {self.MaxPowerStack:.2f} kW needs to be fed with {self.max_h2_stack*3600:.2f} kg/h of hydrogen.")
         
         ###########################################
         if self.model == 'PEM General':
