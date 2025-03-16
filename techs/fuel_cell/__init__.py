@@ -106,6 +106,33 @@ class FuelCell(abc.ABC):
         self.timesteps_year =  self.min_year/self.timestep
         self.timesteps_week =  self.min_week/self.timestep
 
+        ####### Operational period
+        self.state = parameters["state"]                           #on or off
+        self.operational_period = parameters["operational_period"]
+        initial_day, final_day = self.operational_period.split(',')    #extract inital and final operational days
+        initial_day = pd.to_datetime(initial_day, format = '%d-%m')
+        final_day = pd.to_datetime(final_day, format = '%d-%m')
+        year = initial_day.year
+        operational_state = [] 
+        
+        for day in pd.date_range(start = pd.Timestamp(year=year,month=1,day=1), end = pd.Timestamp(year=year+1,month=1, day=1)):
+            if self.state == "on":                 
+                value = 0                                         #initialization
+                if day >= initial_day and day <= final_day:
+                    value = 1                                      #update if turned on 
+                operational_state.append((day, value))
+            elif self.state == "off":
+                 value = 1                                         #initialization
+                 if day >= initial_day and day <= final_day:
+                     value = 0                                    #update if turned off
+                 operational_state.append((day, value))
+        operational_state = pd.DataFrame(operational_state, columns=['Day', 'State'])
+        operational_state.set_index('Day', inplace=True)
+        frequency =  f'{self.timestep}min'
+        operational_state_freq = operational_state.resample(frequency).ffill().iloc[:-1,:]  #resample dataframe to simulation timestep
+        self.operational_state = np.tile(np.array(operational_state_freq['State']), int(self.timestep_number*self.timestep/c.MINUTES_YEAR)) #repeat for simulation years
+
+
     @abc.abstractmethod
     def plot_polarizationpts(self):
         pass
